@@ -217,13 +217,35 @@
 
 		// Function to update zoom
 		function updateZoom(value, pageCount) {
+			// Find which page is currently at the top of the viewport
+			const scrollTop = imageContainer.scrollTop;
+			let targetPage = 0;
+			for (let i = 0; i < imageOffsets.length; i++) {
+				if (scrollTop < imageOffsets[i]) {
+					targetPage = i;
+					break;
+				}
+			}
+			if (imageOffsets.length > 0 && scrollTop >= imageOffsets[imageOffsets.length - 1]) {
+				targetPage = imageOffsets.length - 1;
+			}
+
+			// How far into that page we've scrolled
+			const pageStart = targetPage > 0 ? imageOffsets[targetPage - 1] - 5 : 0;
+			const offsetInPage = scrollTop - pageStart;
+
 			const images = document.querySelectorAll("#imageContainer img");
-			
 			images.forEach(img => {
-				// Update the maxHeight to reflect the zoom level
 				img.style.maxHeight = `${value}vh`;
 			});
 			computeImageOffsets();
+
+			// Restore scroll to keep the same page in view
+			const newPageStart = targetPage > 0 ? imageOffsets[targetPage - 1] - 5 : 0;
+			const imageHeight = imageOffsets[targetPage] - (targetPage > 0 ? imageOffsets[targetPage - 1] - 5 : 0) - 5;
+			const fraction = imageHeight > 0 ? Math.min(offsetInPage, imageHeight) : 0;
+			imageContainer.scrollTop = Math.min(newPageStart + fraction, imageContainer.scrollHeight - imageContainer.clientHeight);
+
 			setPageCounter(pageCount);
 		}
 
