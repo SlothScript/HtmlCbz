@@ -1,6 +1,5 @@
 # HtmlCbz
-A html/js in-browser .cbz comic/manga file viewer<br>
-Mainly intended for use in school/work where apps and other websites are probably blocked, but use it however you'd like!
+A html/js in-browser .cbz comic/manga file viewer
 
 ## How to use
 - Go to [https://maxadams0.github.io/HtmlCbz](https://maxadams0.github.io/HtmlCbz)
@@ -24,9 +23,6 @@ Mainly intended for use in school/work where apps and other websites are probabl
 - Page counter
 
 ## Planned Features
-- ~~Automatic GAS updater (so I don't have to manually copy over changes, has no user benefit besides reliability)~~ Single html file, just cpy+paste!
-- Fix zoom changing page #
 - Better UI
 - Custom css styles
 - Preference menu?
-- ~~More ways to access (for school lol)~~ Google docs & alt. website available

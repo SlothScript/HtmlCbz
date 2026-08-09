@@ -142,50 +142,137 @@
 
 
 		async function loadBook(file) {
-			const d = new Uint8Array(await file.arrayBuffer()), len = d.length;
-			let e = len - 22;
-			while (e >= 0 && !(d[e]===0x50 && d[e+1]===0x4b && d[e+2]===0x05 && d[e+3]===0x06)) e--;
-			if (e < 0) { alert("Could not load cbz file. It may be 7z encoded. Please use zip encoded cbz files only!"); return 0; }
-			const num = d[e+10] | (d[e+11]<<8);
-			let off = d[e+16] | (d[e+17]<<8) | (d[e+18]<<16) | (d[e+19]<<24), entries = [];
-			for (let i = 0; i < num; i++) {
-				const comp = d[off+10] | (d[off+11]<<8), csize = d[off+20] | (d[off+21]<<8) | (d[off+22]<<16) | (d[off+23]<<24), usize = d[off+24] | (d[off+25]<<8) | (d[off+26]<<16) | (d[off+27]<<24), nlen = d[off+28] | (d[off+29]<<8), elen = d[off+30] | (d[off+31]<<8), clen = d[off+32] | (d[off+33]<<8), loff = d[off+42] | (d[off+43]<<8) | (d[off+44]<<16) | (d[off+45]<<24);
-				let name = '';
-				for (let j = 0; j < nlen; j++) name += String.fromCharCode(d[off+46+j]);
-				off += 46 + nlen + elen + clen;
-				entries.push({ name, comp, csize, usize, loff });
+			if (typeof DecompressionStream === 'undefined') {
+				alert("Your browser does not support the DecompressionStream API required to read CBZ files. Please use a newer browser (Chrome 103+, Firefox 113+, Safari 16.4+).");
+				return 0;
 			}
-			const imageFiles = entries.filter(e => e.name.match(/\.(jpg|jpeg|png|gif)$/i)).sort((a, b) => a.name < b.name ? -1 : 1);
-			imageContainer.innerHTML = '';
-			const totalPages = imageFiles.length;
-			let pagesLoaded = 1;
-			const loadPromises = [];
-			for (const entry of imageFiles) {
-				const fnlen = d[entry.loff+26] | (d[entry.loff+27]<<8), exlen = d[entry.loff+28] | (d[entry.loff+29]<<8), dataOff = entry.loff + 30 + fnlen + exlen;
-				const compressed = d.subarray(dataOff, dataOff + entry.csize);
-				let imgData;
-				if (entry.comp === 0) {
-					imgData = new Blob([compressed]);
-				} else if (entry.comp === 8) {
-					const ds = new DecompressionStream('deflate-raw'), writer = ds.writable.getWriter();
-					await writer.write(compressed); await writer.close();
-					const reader = ds.readable.getReader(), chunks = [];
-					while (true) { const {value, done} = await reader.read(); if (done) break; chunks.push(value); }
-					const result = new Uint8Array(entry.usize); let pos = 0;
-					for (const chunk of chunks) { result.set(chunk, pos); pos += chunk.length; }
-					imgData = new Blob([result]);
-				} else continue;
-				const imgUrl = URL.createObjectURL(imgData);
-				const img = document.createElement('img');
-				img.src = imgUrl;
-				imageContainer.appendChild(img);
-				loadPromises.push(new Promise(resolve => { img.onload = resolve; img.onerror = resolve; }));
-				loadingMessage.textContent = `Loading... (${pagesLoaded} / ${totalPages})`;
-				pagesLoaded += 1;
+			try {
+				const d = new Uint8Array(await file.arrayBuffer()), len = d.length;
+
+				// Find the End of Central Directory record (PK\x05\x06), scanning backward.
+				// A candidate is only trusted if its comment length AND central directory
+				// size/offset are consistent, so image data can't cause false positives.
+				let e = len - 22, eocd = -1;
+				while (e >= 0) {
+					if (d[e] === 0x50 && d[e+1] === 0x4b && d[e+2] === 0x05 && d[e+3] === 0x06) {
+						const commentLen = d[e+20] | (d[e+21] << 8);
+						const cdSize = d[e+12] | (d[e+13] << 8) | (d[e+14] << 16) | (d[e+15] << 24);
+						const cdOffset = (d[e+16] | (d[e+17] << 8) | (d[e+18] << 16) | (d[e+19] << 24)) >>> 0;
+						if (e + 22 + commentLen === len && cdOffset + cdSize === e) { eocd = e; break; }
+					}
+					e--;
+				}
+				if (eocd < 0) { alert("Could not load cbz file. It may be 7z encoded. Please use zip encoded cbz files only!"); return 0; }
+
+				// ZIP64 archives are unsupported; detect them (ZIP64 EOCD locator PK\x06\x07
+				// or 0xFFFF/0xFFFFFFFF sentinel values) so they fail cleanly instead of
+				// parsing garbage.
+				const zip64Locator = eocd >= 20 && d[eocd-20] === 0x50 && d[eocd-19] === 0x4b && d[eocd-18] === 0x06 && d[eocd-17] === 0x07;
+				const num = d[eocd+10] | (d[eocd+11] << 8);
+				const cdOff = (d[eocd+16] | (d[eocd+17] << 8) | (d[eocd+18] << 16) | (d[eocd+19] << 24)) >>> 0;
+				if (zip64Locator || num === 0xFFFF || cdOff === 0xFFFFFFFF) {
+					alert("This CBZ uses ZIP64 extensions, which are not supported yet. Please re-zip it as a standard ZIP file.");
+					return 0;
+				}
+
+				// Parse the central directory, validating each entry.
+				if (num > 0 && (cdOff + 46 > len || !(d[cdOff] === 0x50 && d[cdOff+1] === 0x4b && d[cdOff+2] === 0x01 && d[cdOff+3] === 0x02))) {
+					alert("Could not load cbz file: the zip central directory is corrupt or missing (this may be a self-extracting or multi-part archive).");
+					return 0;
+				}
+				const entries = [];
+				let pos = cdOff;
+				for (let i = 0; i < num; i++) {
+					if (pos + 46 > len) break;
+					if ((d[pos] | (d[pos+1] << 8) | (d[pos+2] << 16) | (d[pos+3] << 24)) !== 0x02014b50) break;
+					const comp = d[pos+10] | (d[pos+11] << 8);
+					const csize = (d[pos+20] | (d[pos+21] << 8) | (d[pos+22] << 16) | (d[pos+23] << 24)) >>> 0;
+					const usize = (d[pos+24] | (d[pos+25] << 8) | (d[pos+26] << 16) | (d[pos+27] << 24)) >>> 0;
+					const nlen = d[pos+28] | (d[pos+29] << 8);
+					const elen = d[pos+30] | (d[pos+31] << 8);
+					const clen = d[pos+32] | (d[pos+33] << 8);
+					const loff = (d[pos+42] | (d[pos+43] << 8) | (d[pos+44] << 16) | (d[pos+45] << 24)) >>> 0;
+					if (pos + 46 + nlen + elen + clen > len) break;
+					let name = '';
+					for (let j = 0; j < nlen; j++) name += String.fromCharCode(d[pos+46+j]);
+					pos += 46 + nlen + elen + clen;
+					if (csize === 0xFFFFFFFF || usize === 0xFFFFFFFF || loff === 0xFFFFFFFF) {
+						alert("This CBZ uses ZIP64 extensions, which are not supported yet. Please re-zip it as a standard ZIP file.");
+						return 0;
+					}
+					entries.push({ name, comp, csize, usize, loff });
+				}
+				if (entries.length !== num) {
+					alert("Could not load cbz file: the zip central directory is corrupt or truncated.");
+					return 0;
+				}
+
+				const imageFiles = entries.filter(entry => entry.name.match(/\.(jpg|jpeg|png|gif)$/i)).sort((a, b) => a.name < b.name ? -1 : 1);
+				if (imageFiles.length === 0) {
+					alert("No images (jpg, jpeg, png, or gif) were found in this CBZ file.");
+					return 0;
+				}
+				imageContainer.innerHTML = '';
+				const totalPages = imageFiles.length;
+				const loadPromises = [];
+				const skipped = [];
+				for (let i = 0; i < imageFiles.length; i++) {
+					const entry = imageFiles[i];
+					loadingMessage.textContent = `Loading... (${i} / ${totalPages})`;
+					if (entry.comp !== 0 && entry.comp !== 8) { skipped.push(entry.name); continue; }
+					if (entry.loff + 30 > len) { skipped.push(entry.name); continue; }
+					const fnlen = d[entry.loff+26] | (d[entry.loff+27] << 8);
+					const exlen = d[entry.loff+28] | (d[entry.loff+29] << 8);
+					const dataOff = entry.loff + 30 + fnlen + exlen;
+					if (dataOff + entry.csize > len) { skipped.push(entry.name); continue; }
+					const compressed = d.subarray(dataOff, dataOff + entry.csize);
+					let imgData;
+					try {
+						if (entry.comp === 0) {
+							imgData = new Blob([compressed]);
+						} else {
+							if (entry.usize > 268435456) { skipped.push(entry.name); continue; }
+							const ds = new DecompressionStream('deflate-raw'), writer = ds.writable.getWriter();
+							await writer.write(compressed);
+							await writer.close();
+							const reader = ds.readable.getReader(), chunks = [];
+							while (true) {
+								const { value, done } = await reader.read();
+								if (done) break;
+								chunks.push(value);
+							}
+							const result = new Uint8Array(entry.usize);
+							let p = 0;
+							for (const chunk of chunks) { result.set(chunk, p); p += chunk.length; }
+							imgData = new Blob([result]);
+						}
+					} catch (err) {
+						skipped.push(entry.name);
+						continue;
+					}
+					const imgUrl = URL.createObjectURL(imgData);
+					const img = document.createElement('img');
+					const loadPromise = new Promise(resolve => {
+						let settled = false;
+						const done = () => { if (!settled) { settled = true; resolve(); } };
+						img.onload = done;
+						img.onerror = done;
+						setTimeout(done, 30000); // fallback so one stuck image can't hang loading forever
+					});
+					img.src = imgUrl;
+					imageContainer.appendChild(img);
+					loadPromises.push(loadPromise);
+				}
+				await Promise.all(loadPromises);
+				computeImageOffsets();
+				if (skipped.length > 0) {
+					alert(`${skipped.length} image(s) could not be loaded (unsupported compression or corrupt data): ${skipped.slice(0, 3).join(', ')}${skipped.length > 3 ? ', ...' : ''}`);
+				}
+				return totalPages;
+			} catch (err) {
+				alert("Could not load cbz file.\n\n" + err);
+				return 0;
 			}
-			await Promise.all(loadPromises);
-			computeImageOffsets();
-			return totalPages;
 		}
 
 
